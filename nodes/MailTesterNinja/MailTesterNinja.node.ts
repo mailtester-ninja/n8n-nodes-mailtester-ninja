@@ -7,10 +7,70 @@ import type {
 	INodeTypeDescription,
 	JsonObject,
 } from 'n8n-workflow';
-import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError, sleep } from 'n8n-workflow';
 
 const API_URL = 'https://happy.mailtester.ninja/ninja';
 const FIND_BATCH_SIZE = 3;
+
+// Rate regulator, shared by every execution of this n8n process that uses the same key.
+// The API allows each key daily limit / 8640 requests per 10 seconds (11.57 on Starter and Pro, 23.1 on Ultimate)
+// and answers HTTP 429 above that. We stay one request under the limit over an 11 second window, so a normal run
+// never gets a 429. Free tokens allow one request every 30 seconds: we wait 31 seconds between their requests.
+// If a 429 still comes back (the key is used elsewhere at the same time), we pause the key for one window,
+// retry once, then stop with a clear error: never a burst of retries.
+const WINDOW_MS = 11000;
+const DEFAULT_PER_WINDOW = 10;
+const FREE_GAP_MS = 31000;
+
+interface Limiter {
+	stamps: number[];
+	perWindow: number;
+	chain: Promise<void>;
+	until: number;
+}
+
+const limiters = new Map<string, Limiter>();
+
+function isFreeKey(key: string): boolean {
+	return key === 'free' || key.startsWith('mtf_');
+}
+
+function limiterFor(key: string): Limiter {
+	let limiter = limiters.get(key);
+	if (!limiter) {
+		limiter = { stamps: [], perWindow: DEFAULT_PER_WINDOW, chain: Promise.resolve(), until: 0 };
+		limiters.set(key, limiter);
+	}
+	return limiter;
+}
+
+async function waitForSlot(key: string): Promise<void> {
+	const limiter = limiterFor(key);
+	const window = isFreeKey(key) ? FREE_GAP_MS : WINDOW_MS;
+	const allowed = isFreeKey(key) ? 1 : limiter.perWindow;
+	const turn = limiter.chain.then(async () => {
+		for (;;) {
+			const now = Date.now();
+			limiter.stamps = limiter.stamps.filter((stamp) => now - stamp < window);
+			let wait = Math.max(0, limiter.until - now);
+			if (!wait && limiter.stamps.length >= allowed) wait = limiter.stamps[0] + window - now;
+			if (wait <= 0) {
+				limiter.stamps.push(now);
+				return;
+			}
+			await sleep(wait);
+		}
+	});
+	limiter.chain = turn.catch(() => undefined);
+	await turn;
+}
+
+function learnLimit(key: string, dailyLimit: unknown): void {
+	const limit = Number(dailyLimit);
+	if (limit > 0 && !isFreeKey(key)) {
+		limiterFor(key).perWindow = Math.max(1, Math.floor(limit / 8640) - 1);
+	}
+}
 
 const PATTERNS = [
 	'{fn}.{mn}.{ln}',
@@ -82,6 +142,7 @@ async function verifyEmail(
 	context: IExecuteFunctions,
 	email: string,
 	itemIndex: number,
+	apiKey: string,
 ): Promise<IDataObject> {
 	const options: IHttpRequestOptions = {
 		method: 'GET',
@@ -89,16 +150,43 @@ async function verifyEmail(
 		qs: { email },
 		json: true,
 		timeout: 60000,
+		returnFullResponse: true,
+		ignoreHttpStatusErrors: true,
 	};
-	let response: IDataObject;
-	try {
-		response = (await context.helpers.httpRequestWithAuthentication.call(
-			context,
-			'mailTesterNinjaApi',
-			options,
-		)) as IDataObject;
-	} catch (error) {
-		throw new NodeApiError(context.getNode(), error as JsonObject, { itemIndex });
+	let response: IDataObject = {};
+	for (let attempt = 0; attempt < 2; attempt++) {
+		await waitForSlot(apiKey);
+		let full: { statusCode: number; body: unknown };
+		try {
+			full = (await context.helpers.httpRequestWithAuthentication.call(
+				context,
+				'mailTesterNinjaApi',
+				options,
+			)) as { statusCode: number; body: unknown };
+		} catch (error) {
+			throw new NodeApiError(context.getNode(), error as JsonObject, { itemIndex });
+		}
+		if (full.statusCode === 429) {
+			if (attempt === 1) {
+				throw new NodeOperationError(context.getNode(), 'MailTester Ninja rate limit reached', {
+					itemIndex,
+					description:
+						'This key is already used at its maximum rate somewhere else at the same time (Starter and Pro: 11 requests per 10 seconds, Ultimate: 23). Try again in a minute, or spread the checks out.',
+				});
+			}
+			limiterFor(apiKey).until = Date.now() + (isFreeKey(apiKey) ? FREE_GAP_MS : WINDOW_MS);
+			continue;
+		}
+		if (full.statusCode >= 400) {
+			throw new NodeOperationError(
+				context.getNode(),
+				`MailTester Ninja answered HTTP ${full.statusCode}: ${String(full.body).slice(0, 200)}`,
+				{ itemIndex },
+			);
+		}
+		response = (typeof full.body === 'object' && full.body !== null ? full.body : {}) as IDataObject;
+		learnLimit(apiKey, response.limit);
+		break;
 	}
 	if (response.code === '--') {
 		throw new NodeOperationError(
@@ -222,15 +310,17 @@ export class MailTesterNinja implements INodeType {
 			try {
 				const operation = this.getNodeParameter('operation', itemIndex) as string;
 
+				const credentials = await this.getCredentials('mailTesterNinjaApi', itemIndex);
+				const apiKey = String(credentials.apiKey ?? '').trim();
+
 				if (operation === 'verify') {
 					const email = (this.getNodeParameter('email', itemIndex) as string).trim();
-					const result = await verifyEmail(this, email, itemIndex);
+					const result = await verifyEmail(this, email, itemIndex, apiKey);
 					returnData.push({ json: result, pairedItem: { item: itemIndex } });
 					continue;
 				}
 
-				const credentials = await this.getCredentials('mailTesterNinjaApi', itemIndex);
-				if (!String(credentials.apiKey ?? '').trim().startsWith('sub_')) {
+				if (isFreeKey(apiKey)) {
 					throw new NodeOperationError(
 						this.getNode(),
 						'Find needs a paid MailTester Ninja key',
@@ -262,7 +352,7 @@ export class MailTesterNinja implements INodeType {
 				for (let start = 0; start < candidates.length && !outcome; start += FIND_BATCH_SIZE) {
 					const batch = candidates.slice(start, start + FIND_BATCH_SIZE);
 					const results = await Promise.all(
-						batch.map(async (email) => await verifyEmail(this, email, itemIndex)),
+						batch.map(async (email) => await verifyEmail(this, email, itemIndex, apiKey)),
 					);
 					for (let j = 0; j < batch.length && !outcome; j++) {
 						const result = results[j];

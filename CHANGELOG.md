@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Automatic rate pacing per API key: Verify and Find stay within the key's rate (no more HTTP 429 on lists or on fast domains), shared by the executions that use the same key.
+- On an unexpected HTTP 429 (key used elsewhere at the same time), one retry after 11 seconds, then a clear error.
+- With a free token, Verify waits 31 seconds between requests instead of failing.
+
 ## 0.1.2
 
 - README: two importable example workflows in `examples/` (verify new sign-ups, find a work email).

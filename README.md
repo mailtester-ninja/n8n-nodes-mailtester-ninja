@@ -50,7 +50,7 @@ Takes a first name, a last name, a company domain and an optional middle name. T
 - **Enrich leads:** a row with first name, last name and company domain, then **Find**, then your outreach tool.
 - **AI agents:** the node can be used as a tool by the n8n AI Agent, so the agent can check an address before it sends anything.
 
-With the free token, keep one request every 30 seconds (for example with a **Wait** node or batches of one). Paid keys allow about 11 requests every 10 seconds, more on higher plans.
+The node paces its requests to stay within your key's rate, so you do not need **Wait** nodes: one request every 30 seconds with a free token, about 11 every 10 seconds on Starter and Pro, 23 on Ultimate. Executions that share a key in the same n8n instance share that rate. If the key is also used somewhere else at the same time and the API still answers HTTP 429, the node pauses for 11 seconds, retries once, then stops with a clear error.
 
 ## Example workflows
 
