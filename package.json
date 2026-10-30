@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-mailtester-ninja",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "n8n node for MailTester Ninja: verify email addresses in real time against their mail server and find work emails",
 	"license": "MIT",
 	"homepage": "https://mailtester.ninja/integrations/n8n/",
