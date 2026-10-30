@@ -1,0 +1,119 @@
+{
+	"name": "Verify new sign-ups with MailTester Ninja",
+	"nodes": [
+		{
+			"parameters": {
+				"httpMethod": "POST",
+				"path": "mailtester-signup",
+				"options": {}
+			},
+			"id": "b7e1c2d4-0001-4000-8000-000000000001",
+			"name": "Sign-up webhook",
+			"type": "n8n-nodes-base.webhook",
+			"typeVersion": 2,
+			"position": [240, 300],
+			"webhookId": "b7e1c2d4-0001-4000-8000-00000000aa01"
+		},
+		{
+			"parameters": {
+				"operation": "verify",
+				"email": "={{ $json.body.email }}"
+			},
+			"id": "b7e1c2d4-0002-4000-8000-000000000002",
+			"name": "Verify email",
+			"type": "n8n-nodes-mailtester-ninja.mailTesterNinja",
+			"typeVersion": 1,
+			"position": [460, 300]
+		},
+		{
+			"parameters": {
+				"conditions": {
+					"options": {
+						"caseSensitive": true,
+						"typeValidation": "strict"
+					},
+					"conditions": [
+						{
+							"id": "cond-3",
+							"leftValue": "={{ $json.code }}",
+							"operator": {
+								"type": "string",
+								"operation": "equals"
+							},
+							"rightValue": "ok"
+						}
+					],
+					"combinator": "and"
+				},
+				"options": {}
+			},
+			"id": "b7e1c2d4-0003-4000-8000-000000000003",
+			"name": "Valid address?",
+			"type": "n8n-nodes-base.if",
+			"typeVersion": 2,
+			"position": [680, 300]
+		},
+		{
+			"parameters": {},
+			"id": "b7e1c2d4-0004-4000-8000-000000000004",
+			"name": "Add to CRM",
+			"type": "n8n-nodes-base.noOp",
+			"typeVersion": 1,
+			"position": [900, 200]
+		},
+		{
+			"parameters": {},
+			"id": "b7e1c2d4-0005-4000-8000-000000000005",
+			"name": "Reject or review",
+			"type": "n8n-nodes-base.noOp",
+			"typeVersion": 1,
+			"position": [900, 400]
+		}
+	],
+	"connections": {
+		"Sign-up webhook": {
+			"main": [
+				[
+					{
+						"node": "Verify email",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Verify email": {
+			"main": [
+				[
+					{
+						"node": "Valid address?",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Valid address?": {
+			"main": [
+				[
+					{
+						"node": "Add to CRM",
+						"type": "main",
+						"index": 0
+					}
+				],
+				[
+					{
+						"node": "Reject or review",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}

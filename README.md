@@ -4,7 +4,7 @@ The official [MailTester Ninja](https://mailtester.ninja) node for [n8n](https:/
 
 Every check talks to the recipient's own mail server over SMTP and stops before any message is sent. You get a plain verdict back, and MailTester Ninja keeps no copy of the addresses you verify.
 
-[Installation](#installation) · [Credentials](#credentials) · [Operations](#operations) · [Usage](#usage) · [Compatibility](#compatibility) · [Resources](#resources)
+[Installation](#installation) · [Credentials](#credentials) · [Operations](#operations) · [Usage](#usage) · [Example workflows](#example-workflows) · [Compatibility](#compatibility) · [Resources](#resources)
 
 ## Installation
 
@@ -31,11 +31,11 @@ The key is sent as the `key` query parameter. **Test** checks that the key is ac
 
 Checks one address. Output:
 
-| Field | Meaning |
-|---|---|
-| `code` | `ok` valid, `ko` invalid, `mb` uncertain |
-| `message` | `Accepted`, `Rejected`, `Catch-All`, `No MX`, `MX Error`, `Disposable`, `Timeout`, `SPAM Block`, `Limited` |
-| `email`, `domain`, `mx` | The address checked, its domain and the mail server that answered |
+| Field                   | Meaning                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `code`                  | `ok` valid, `ko` invalid, `mb` uncertain                                                                   |
+| `message`               | `Accepted`, `Rejected`, `Catch-All`, `No MX`, `MX Error`, `Disposable`, `Timeout`, `SPAM Block`, `Limited` |
+| `email`, `domain`, `mx` | The address checked, its domain and the mail server that answered                                          |
 
 Treat `mb` as uncertain, never as valid: a catch-all domain accepts every address, so no single mailbox can be confirmed there.
 
@@ -51,6 +51,13 @@ Takes a first name, a last name, a company domain and an optional middle name. T
 - **AI agents:** the node can be used as a tool by the n8n AI Agent, so the agent can check an address before it sends anything.
 
 With the free token, keep one request every 30 seconds (for example with a **Wait** node or batches of one). Paid keys allow about 11 requests every 10 seconds, more on higher plans.
+
+## Example workflows
+
+Two ready-to-import workflows are in [`examples/`](examples/). In n8n, open **Workflows > Import from File**, then select your **MailTester Ninja API** credential in the MailTester Ninja node.
+
+- [`verify-new-signups.json`](examples/verify-new-signups.json): a webhook receives a sign-up, **Verify** checks the address, and an **If** node sends valid addresses (`code` = `ok`) to your CRM and the others to review.
+- [`find-work-email.json`](examples/find-work-email.json): a lead with first name, last name and company domain goes through **Find**, and an **If** node on `found` routes it to your outreach tool (paid key).
 
 ## Compatibility
 
