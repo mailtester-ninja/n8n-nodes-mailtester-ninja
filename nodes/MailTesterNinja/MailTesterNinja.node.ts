@@ -10,7 +10,7 @@ import type {
 import { NodeApiError, NodeConnectionTypes, NodeOperationError, sleep } from 'n8n-workflow';
 
 const API_URL = 'https://happy.mailtester.ninja/ninja';
-const FIND_BATCH_SIZE = 3;
+const FIND_URL = 'https://happy.mailtester.ninja/find';
 
 // Rate regulator, shared by every execution of this n8n process that uses the same key.
 // The API allows each key daily limit / 8640 requests per 10 seconds (11.57 on Starter and Pro, 23.1 on Ultimate)
@@ -70,72 +70,6 @@ function learnLimit(key: string, dailyLimit: unknown): void {
 	if (limit > 0 && !isFreeKey(key)) {
 		limiterFor(key).perWindow = Math.max(1, Math.floor(limit / 8640) - 1);
 	}
-}
-
-const PATTERNS = [
-	'{fn}.{mn}.{ln}',
-	'{fn}{mn}{ln}',
-	'{fn}.{ln}',
-	'{ln}.{fn}',
-	'{fn}{ln}',
-	'{ln}{fn}',
-	'{fi}{ln}',
-	'{fn}{li}',
-	'{li}{fn}',
-	'{ln}{fi}',
-	'{fn}',
-	'{ln}',
-	'{fi}.{ln}',
-];
-
-const STOP_REASONS: Record<string, string> = {
-	'Catch-All': 'The domain accepts every address (catch-all), so no candidate can be confirmed.',
-	'No MX': 'The domain has no mail server.',
-	Disposable: 'The domain belongs to a disposable email provider.',
-};
-
-function normalizeName(value: string): string {
-	return value
-		.normalize('NFD')
-		.replace(/[\u0300-\u036f]/g, '')
-		.toLowerCase()
-		.replace(/['’\s]+/g, '')
-		.replace(/[^a-z0-9._-]/g, '');
-}
-
-function normalizeDomain(value: string): string {
-	return value
-		.trim()
-		.toLowerCase()
-		.replace(/^https?:\/\//, '')
-		.replace(/^www\./, '')
-		.replace(/[/?#].*$/, '')
-		.replace(/^.*@/, '');
-}
-
-function buildCandidates(
-	firstName: string,
-	lastName: string,
-	middleName: string,
-	domain: string,
-): string[] {
-	const parts: Record<string, string> = {
-		fn: normalizeName(firstName),
-		ln: normalizeName(lastName),
-		mn: normalizeName(middleName),
-	};
-	parts.fi = parts.fn.slice(0, 1);
-	parts.li = parts.ln.slice(0, 1);
-	const candidates: string[] = [];
-	for (const pattern of PATTERNS) {
-		if (pattern.includes('{mn}') && !parts.mn) continue;
-		const local = pattern.replace(/\{(fn|ln|mn|fi|li)\}/g, (_match, key: string) => parts[key]);
-		const email = `${local}@${domain}`;
-		if (local && !local.startsWith('.') && !local.endsWith('.') && !candidates.includes(email)) {
-			candidates.push(email);
-		}
-	}
-	return candidates;
 }
 
 async function verifyEmail(
@@ -208,6 +142,92 @@ async function verifyEmail(
 	};
 }
 
+// The Finder API tests the patterns one by one on the MailTester Ninja server, within the rate of the key:
+// each pattern tested counts as one verification, the /find request itself does not. One slot is taken for
+// the call, then the other patterns it used are recorded so that the next requests of the same key stay
+// under the limit.
+async function findEmail(
+	context: IExecuteFunctions,
+	firstName: string,
+	lastName: string,
+	domain: string,
+	itemIndex: number,
+	apiKey: string,
+): Promise<IDataObject> {
+	const options: IHttpRequestOptions = {
+		method: 'GET',
+		url: FIND_URL,
+		qs: { first: firstName, last: lastName, domain },
+		json: true,
+		timeout: 60000,
+		returnFullResponse: true,
+		ignoreHttpStatusErrors: true,
+	};
+	let response: IDataObject = {};
+	for (let attempt = 0; attempt < 2; attempt++) {
+		await waitForSlot(apiKey);
+		let full: { statusCode: number; body: unknown };
+		try {
+			full = (await context.helpers.httpRequestWithAuthentication.call(
+				context,
+				'mailTesterNinjaApi',
+				options,
+			)) as { statusCode: number; body: unknown };
+		} catch (error) {
+			throw new NodeApiError(context.getNode(), error as JsonObject, { itemIndex });
+		}
+		const body = (typeof full.body === 'object' && full.body !== null ? full.body : {}) as IDataObject;
+		if (full.statusCode === 429) {
+			const tested = Number(body.permutations) || 0;
+			if (attempt === 1 || tested > 0) {
+				throw new NodeOperationError(context.getNode(), 'MailTester Ninja rate limit reached', {
+					itemIndex,
+					description:
+						tested > 0
+							? `The key reached its maximum rate during the search (${tested} patterns checked). Try again in a minute.`
+							: 'This key is already used at its maximum rate somewhere else at the same time (Starter and Pro: 11 verifications per 10 seconds, Ultimate: 23). Try again in a minute, or spread the searches out.',
+				});
+			}
+			limiterFor(apiKey).until = Date.now() + WINDOW_MS;
+			continue;
+		}
+		if (full.statusCode >= 400) {
+			throw new NodeOperationError(
+				context.getNode(),
+				`MailTester Ninja did not run the search: ${String(body.message ?? `HTTP ${full.statusCode}`)}`,
+				{ itemIndex, description: String(body.reason ?? '') },
+			);
+		}
+		response = body;
+		learnLimit(apiKey, response.limit);
+		const limiter = limiterFor(apiKey);
+		const now = Date.now();
+		for (let i = 1; i < (Number(response.permutations) || 0); i++) limiter.stamps.push(now);
+		break;
+	}
+	if (response.code === '--') {
+		throw new NodeOperationError(
+			context.getNode(),
+			`MailTester Ninja did not run the search: ${String(response.message)}`,
+			{
+				itemIndex,
+				description:
+					'Make sure the API key in your credentials is an active paid key: https://mailtester.ninja/verify-emails-unlimited/',
+			},
+		);
+	}
+	return {
+		found: response.found === true,
+		email: response.email ?? null,
+		guess: response.guess ?? null,
+		code: response.code,
+		message: response.message,
+		domain: response.domain ?? null,
+		tried: Number(response.permutations) || 0,
+		reason: response.reason ?? null,
+	};
+}
+
 export class MailTesterNinja implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'MailTester Ninja',
@@ -270,7 +290,7 @@ export class MailTesterNinja implements INodeType {
 				default: '',
 				required: true,
 				displayOptions: { show: { operation: ['find'] } },
-				description: "The person's first name",
+				description: "The person's first name, for example Jean-Pierre",
 			},
 			{
 				displayName: 'Last Name',
@@ -279,7 +299,7 @@ export class MailTesterNinja implements INodeType {
 				default: '',
 				required: true,
 				displayOptions: { show: { operation: ['find'] } },
-				description: "The person's last name",
+				description: "The person's last name, for example De La Tour",
 			},
 			{
 				displayName: 'Company Domain',
@@ -290,14 +310,6 @@ export class MailTesterNinja implements INodeType {
 				required: true,
 				displayOptions: { show: { operation: ['find'] } },
 				description: "The company's email domain",
-			},
-			{
-				displayName: 'Middle Name',
-				name: 'middleName',
-				type: 'string',
-				default: '',
-				displayOptions: { show: { operation: ['find'] } },
-				description: "The person's middle name, if any",
 			},
 		],
 	};
@@ -327,71 +339,20 @@ export class MailTesterNinja implements INodeType {
 						{
 							itemIndex,
 							description:
-								'Find checks several address patterns in a row, which the free API token (one request every 30 seconds) cannot do. Use a paid key starting with sub_: https://mailtester.ninja/verify-emails-unlimited/',
+								'Find tests up to 6 address patterns in a row, each one counted as a verification. Use a paid key starting with sub_: https://mailtester.ninja/verify-emails-unlimited/',
 						},
 					);
 				}
 
-				const domain = normalizeDomain(this.getNodeParameter('domain', itemIndex) as string);
-				const candidates = buildCandidates(
-					this.getNodeParameter('firstName', itemIndex) as string,
-					this.getNodeParameter('lastName', itemIndex) as string,
-					this.getNodeParameter('middleName', itemIndex, '') as string,
-					domain,
+				const result = await findEmail(
+					this,
+					(this.getNodeParameter('firstName', itemIndex) as string).trim(),
+					(this.getNodeParameter('lastName', itemIndex) as string).trim(),
+					(this.getNodeParameter('domain', itemIndex) as string).trim(),
+					itemIndex,
+					apiKey,
 				);
-				if (!candidates.length || !domain.includes('.')) {
-					throw new NodeOperationError(
-						this.getNode(),
-						'Provide a first name, a last name and a company domain such as example.com',
-						{ itemIndex },
-					);
-				}
-
-				let outcome: IDataObject | undefined;
-				let tried = 0;
-				for (let start = 0; start < candidates.length && !outcome; start += FIND_BATCH_SIZE) {
-					const batch = candidates.slice(start, start + FIND_BATCH_SIZE);
-					const results = await Promise.all(
-						batch.map(async (email) => await verifyEmail(this, email, itemIndex, apiKey)),
-					);
-					for (let j = 0; j < batch.length && !outcome; j++) {
-						const result = results[j];
-						tried++;
-						if (result.message === 'Accepted') {
-							outcome = {
-								found: true,
-								email: batch[j],
-								code: result.code,
-								message: result.message,
-								tried,
-								reason: null,
-							};
-						} else if (result.message !== 'Rejected' && result.message !== 'Limited') {
-							outcome = {
-								found: false,
-								email: null,
-								code: result.code,
-								message: result.message,
-								tried,
-								reason:
-									STOP_REASONS[String(result.message)] ??
-									`The domain could not be checked (${String(result.message)}).`,
-							};
-						}
-					}
-				}
-
-				returnData.push({
-					json: outcome ?? {
-						found: false,
-						email: null,
-						code: 'ko',
-						message: 'Rejected',
-						tried,
-						reason: 'None of the usual address patterns exists on this domain.',
-					},
-					pairedItem: { item: itemIndex },
-				});
+				returnData.push({ json: result, pairedItem: { item: itemIndex } });
 			} catch (error) {
 				if (this.continueOnFail()) {
 					returnData.push({
