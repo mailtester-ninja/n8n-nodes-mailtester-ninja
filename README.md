@@ -41,7 +41,7 @@ Treat `mb` as uncertain, never as valid: a catch-all domain accepts every addres
 
 ### Find (paid key)
 
-Takes a first name, a last name and a company domain. MailTester Ninja tests the 6 most common patterns (`first.last`, `flast`, `first`, `firstlast`, `first_last`, `f.last`) one by one on its server and returns the first address the mail server accepts. It stops early on catch-all domains (the most common pattern is then given in `guess`), domains without a mail server and disposable domains. Personal email providers such as gmail.com are not searched. Each pattern tested counts as one verification. Output: `found`, `email`, `guess`, `code`, `message`, `domain`, `tried`, `reason`.
+Takes a first name, a last name and a company domain. MailTester Ninja tests the 6 most common patterns (`first.last`, `flast`, `first`, `firstlast`, `first_last`, `f.last`) one by one on its server and returns the first address the mail server accepts. It stops early on catch-all domains (the most common pattern is then given in `guess`), domains without a mail server and disposable domains. Personal email providers such as gmail.com are not searched. Each pattern tested counts as one verification. Output: `found`, `email`, `format` (the pattern found, such as `first.last`), `confidence` (`high` with first and last name, `medium` with an initial, `low` with the first name only), `guess`, `code`, `message`, `domain`, `tried`, `tested` (every address checked, with its verdict), `reason`.
 
 ## Usage
 

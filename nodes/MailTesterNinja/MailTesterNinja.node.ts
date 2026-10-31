@@ -219,11 +219,14 @@ async function findEmail(
 	return {
 		found: response.found === true,
 		email: response.email ?? null,
+		format: response.format ?? null,
+		confidence: response.confidence ?? null,
 		guess: response.guess ?? null,
 		code: response.code,
 		message: response.message,
 		domain: response.domain ?? null,
 		tried: Number(response.permutations) || 0,
+		tested: Array.isArray(response.tested) ? response.tested : [],
 		reason: response.reason ?? null,
 	};
 }
